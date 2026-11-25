@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>AI 指マウス ドキュメント＆PDFビューア（小指ペン対応）</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Meiryo, sans-serif;
+      background-color: #1e1e2e;
+      color: #cdd6f4;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+
+    /* 見やすく視認性を高めた仮想カーソル */
+    #virtual-cursor {
+      position: fixed;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background-color: rgba(0, 230, 118, 0.45);
+      border: 3px solid #ffffff;
+      outline: 2.5px solid #11111b;
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+      pointer-events: none;
+      z-index: 9999;
+      transform: translate(-50%, -50%);
+      display: none;
+      transition: width 0.1s ease, height 0.1s ease, border-radius 0.12s ease, transform 0.08s ease;
+    }
+    #virtual-cursor::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 6px;
+      height: 6px;
+      background-color: #11111b;
+      border: 1.5px solid #ffffff;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    /* クリック中 */
+    #virtual-cursor.clicking {
+      width: 24px;
+      height: 24px;
+      background-color: rgba(255, 61, 87, 0.85);
+      border-color: #ffffff;
+      outline-color: #11111b;
+      box-shadow: 0 0 0 6px rgba(255, 61, 87, 0.35), 0 3px 10px rgba(0, 0, 0, 0.6);
+      transform: translate(-50%, -50%) scale(0.85);
+    }
+
+    /* スクロール中 */
+    #virtual-cursor.scrolling {
+      width: 34px;
+      height: 34px;
+      background-color: rgba(41, 121, 255, 0.85);
+      border-radius: 8px;
+      border-color: #ffffff;
+      outline-color: #11111b;
+    }
+    #virtual-cursor.scrolling::after {
+      content: '⇕';
+      width: auto;
+      height: auto;
+      background: none;
+      border: none;
+      color: #ffffff;
+      font-size: 18px;
+      font-weight: bold;
+      text-shadow: 0 1px 2px #000;
+    }
+
+    /* ズーム中 */
+    #virtual-cursor.zooming {
+      width: 42px;
+      height: 42px;
+      background-color: rgba(255, 214, 0, 0.75);
+      border: 3px dashed #11111b;
+      outline: 2.5px solid #ffffff;
+    }
+    #virtual-cursor.zooming::after {
+      content: '🔍';
+      width: auto;
+      height: auto;
+      background: none;
+      border: none;
+      font-size: 16px;
+    }
+
+    /* ペン持ち状態（小指のみ：ホバー移動）＆筆記状態（小指＋親指：インクON） */
+    #virtual-cursor.pen-hold,
+    #virtual-cursor.drawing {
+      width: 44px;
+      height: 44px;
+      background: none !important;
+      border: none !important;
+      outline: none !important;
+      box-shadow: none !important;
+      border-radius: 0;
+      /* ペン先（左下）がカーソル座標にぴったり一致するようにオフセット */
+      transform: translate(-4px, -40px);
+    }
+    #virtual-cursor.pen-hold::after,
+    #virtual-cursor.drawing::after {
+      display: none;
+    }
+    #pen-svg {
+      display: none;
+      width: 100%;
+      height: 100%;
+      filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.55));
+    }
+    #virtual-cursor.pen-hold #pen-svg,
+    #virtual-cursor.drawing #pen-svg {
+      display: block;
+    }
+    /* インクが出ている時はペン先に発光リングを表示 */
+    #virtual-cursor.drawing #pen-ink-glow {
+      opacity: 1;
+    }
+    #pen-ink-glow {
+      opacity: 0;
+      transition: opacity 0.1s ease;
+    }
+
+    .left-panel {
+      width: 340px;
+      background-color: #181825;
+      border-right: 1px solid #313244;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .camera-container {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 2px solid #cba6f7;
+    }
+    #input_video { display: none; }
+    #output_canvas { width: 100%; height: 100%; display: block; }
+    .status-badge {
+      padding: 8px;
+      border-radius: 6px;
+      background: #313244;
+      font-size: 13px;
+      text-align: center;
+      font-weight: bold;
+    }
+    .guide-box {
+      background: #1e1e2e;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      line-height: 1.65;
+      border: 1px solid #313244;
+    }
+    .right-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .toolbar {
+      background-color: #181825;
+      padding: 12px 20px;
+      border-bottom: 1px solid #313244;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .btn {
+      background-color: #313244;
+      color: #cdd6f4;
+      border: 1px solid #45475a;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13.5px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    .btn:hover { background-color: #45475a; }
+    .btn-primary { background-color: #89b4fa; color: #11111b; border: none; }
+    .btn-success { background-color: #a6e3a1; color: #11111b; border: none; }
+    .btn-warning { background-color: #f9e2af; color: #11111b; border: none; }
+    .btn-danger  { background-color: #f38ba8; color: #11111b; border: none; }
+    .btn-active  { background-color: #f38ba8; color: #11111b; border: 2px solid #fff; }
+
+    .pen-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #1e1e2e;
+      padding: 4px 8px;
+      border-radius: 8px;
+      border: 1px solid #45475a;
+    }
+    .color-dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 2px solid #fff;
+      cursor: pointer;
+    }
+    .color-dot.selected {
+      transform: scale(1.2);
+      box-shadow: 0 0 6px #fff;
+    }
+
+    .doc-header {
+      padding: 10px 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #doc-title {
+      flex: 1;
+      background: #313244;
+      border: 1px solid #45475a;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 16px;
+    }
+    .editor-wrapper {
+      flex: 1;
+      padding: 10px 24px 24px 24px;
+      overflow: auto;
+      display: flex;
+      justify-content: center;
+    }
+    #zoom-stage {
+      position: relative;
+      width: 100%;
+      max-width: 820px;
+      min-height: 1000px;
+      height: fit-content;
+      transform-origin: top left;
+    }
+    #document-area {
+      width: 100%;
+      min-height: 1000px;
+      background-color: #ffffff;
+      color: #111111;
+      padding: 40px 50px;
+      border-radius: 4px;
+      font-size: 16px;
+      line-height: 1.8;
+      outline: none;
+    }
+    #pdf-box {
+      display: none;
+      width: 100%;
+      height: 3000px;
+      background: #fff;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #pdf-embed {
+      width: 100%;
+      height: 100%;
+      border: none;
+      pointer-events: none;
+    }
+    #drawing-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    body.fullscreen-view .left-panel { display: none; }
+    body.fullscreen-view .doc-header { display: none; }
+    body.fullscreen-view .editor-wrapper { padding: 8px; }
+    body.fullscreen-view #zoom-stage { max-width: 1200px; }
+  </style>
+</head>
+<body>
+  <div id="virtual-cursor">
+    <!-- ペンカーソル用SVG（左下 (4, 40) がペン先） -->
+    <svg id="pen-svg" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">
+      <!-- インクON時の発光リング -->
+      <circle id="pen-ink-glow" cx="4" cy="40" r="6" fill="none" stroke="#e63946" stroke-width="2.5" />
+      <!-- ペン本体 -->
+      <g transform="translate(4, 40) rotate(-45)">
+        <!-- ペン先（ニブ） -->
+        <polygon points="0,0 11,-4.5 11,4.5" fill="#f8f9fa" stroke="#11111b" stroke-width="1.5" stroke-linejoin="round" />
+        <!-- ペン先のインク色チップ -->
+        <polygon id="pen-nib-tip" points="0,0 4.5,-1.8 4.5,1.8" fill="#e63946" />
+        <!-- グリップリング -->
+        <rect x="11" y="-5" width="3.5" height="10" rx="1" fill="#adb5bd" stroke="#11111b" stroke-width="1.4" />
+        <!-- 軸（バレル） -->
+        <rect x="14.5" y="-5" width="24" height="10" rx="2" fill="#2b2d42" stroke="#11111b" stroke-width="1.5" />
+        <!-- カラーバンド（選択中のインク色） -->
+        <rect id="pen-body-band" x="29" y="-5" width="5" height="10" fill="#e63946" stroke="#11111b" stroke-width="1.2" />
+        <!-- ノック部（キャップ） -->
+        <rect x="38.5" y="-4" width="5" height="8" rx="1.5" fill="#e9ecef" stroke="#11111b" stroke-width="1.4" />
+      </g>
+    </svg>
+  </div>
+
+  <div class="left-panel">
+    <div class="camera-container">
+      <video id="input_video" autoplay playsinline></video>
+      <canvas id="output_canvas" width="320" height="240"></canvas>
+    </div>
+    <div id="status-text" class="status-badge">カメラ準備中...</div>
+    <div class="guide-box">
+      <b>操作方法（指ごとに完全分離）：</b><br>
+      ・<b>人差し指（1本）:</b> カーソル移動<br>
+      ・<b>親指＋人差し指を密着:</b> クリック<br>
+      ・<b>2本指（人差し指＋中指）:</b> スクロール<br>
+      ・<b>パー（5本指）:</b> 拡大・縮小<br>
+      ・<b>小指だけ立てる:</b> ペンを持つ（移動のみ）<br>
+      ・<b>🤙 小指＋親指を伸ばす:</b> <b>インクが出て筆記</b>
+    </div>
+    <button class="btn" onclick="startCamera()">🔄 カメラを再起動する</button>
+    <button class="btn" onclick="loadSampleDoc()">📄 サンプル文書を開く</button>
+  </div>
+
+  <div class="right-panel">
+    <div class="toolbar">
+      <button class="btn" onclick="newDocument()">📄 新規</button>
+      <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">📂 開く (PDF/文書)</button>
+      <input type="file" id="file-input" accept=".pdf,.txt,.html,.htm,.md,.doc" style="display:none" onchange="handleFileOpen(event)">
+
+      <div class="pen-controls">
+        <button class="btn btn-active" id="pen-toggle-btn" onclick="togglePenMode()">🤙 小指ペン: ON</button>
+        <div class="color-dot selected" style="background:#e63946;" onclick="setPenColor('#e63946', this)" title="赤"></div>
+        <div class="color-dot" style="background:#1d3557;" onclick="setPenColor('#1d3557', this)" title="青"></div>
+        <div class="color-dot" style="background:#11111b;" onclick="setPenColor('#11111b', this)" title="黒"></div>
+        <div class="color-dot" style="background:#2a9d8f;" onclick="setPenColor('#2a9d8f', this)" title="緑"></div>
+        <button class="btn" onclick="cyclePenWidth()" id="pen-width-btn">太さ: 中</button>
+        <button class="btn btn-danger" onclick="clearDrawing()">🗑️ 消去</button>
+      </div>
+
+      <span id="editor-buttons" style="display:flex; gap:6px;">
+        <button class="btn" onclick="execCmd('formatBlock', 'H1')">H1</button>
+        <button class="btn" onclick="execCmd('bold')"><b>B</b></button>
+        <button class="btn btn-success" onclick="exportToWord()">💾 Word保存</button>
+      </span>
+
+      <button class="btn" onclick="setZoom(currentZoom + 0.15)">＋</button>
+      <button class="btn" onclick="setZoom(currentZoom - 0.15)">－</button>
+      <button class="btn" onclick="setZoom(1.0)">100%</button>
+
+      <button class="btn btn-warning" id="fullscreen-btn" onclick="toggleFullView()" style="margin-left:auto;">⛶ 全画面</button>
+    </div>
+
+    <div class="doc-header">
+      <span>タイトル:</span>
+      <input type="text" id="doc-title" value="無題のドキュメント">
+    </div>
+
+    <div class="editor-wrapper" id="editor-scroll-container">
+      <div id="zoom-stage">
+        <div id="document-area" contenteditable="true">
+          <h1>AI指マウス 小指ペン対応</h1>
+          <p><b>小指だけ</b>を立てるとペンを持ち、書き始めたい位置まで移動できます。</p>
+          <p>そのまま<b>親指を伸ばす（🤙）</b>とペン先からインクが出て文字や図形が描けます。親指を曲げるとペン先が離れます。</p>
+        </div>
+        <div id="pdf-box">
+          <embed id="pdf-embed" type="application/pdf" src="">
+        </div>
+        <canvas id="drawing-canvas" width="820" height="3000"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const zoomStage = document.getElementById('zoom-stage');
+    const docArea = document.getElementById('document-area');
+    const pdfBox = document.getElementById('pdf-box');
+    const pdfEmbed = document.getElementById('pdf-embed');
+    const drawCanvas = document.getElementById('drawing-canvas');
+    const drawCtx = drawCanvas.getContext('2d');
+    const editorButtons = document.getElementById('editor-buttons');
+    const docTitle = document.getElementById('doc-title');
+    const scrollContainer = document.getElementById('editor-scroll-container');
+    const statusText = document.getElementById('status-text');
+    const fullscreenBtn = document.getElementById('fullscreen-btn');
+    const penToggleBtn = document.getElementById('pen-toggle-btn');
+    const penWidthBtn = document.getElementById('pen-width-btn');
+    const penNibTip = document.getElementById('pen-nib-tip');
+    const penBodyBand = document.getElementById('pen-body-band');
+    const penInkGlow = document.getElementById('pen-ink-glow');
+
+    let currentZoom = 1.0;
+    let isPdfMode = false;
+
+    let isPenMode = true;
+    let penColor = '#e63946';
+    const penWidths = [
+      { label: '細', size: 2.5 },
+      { label: '中', size: 5 },
+      { label: '太', size: 10 }
+    ];
+    let penWidthIdx = 1;
+    let lastDrawX = null;
+    let lastDrawY = null;
+    let wasPenActive = false;
+
+    function togglePenMode() {
+      isPenMode = !isPenMode;
+      lastDrawX = null;
+      lastDrawY = null;
+      wasPenActive = false;
+      if (isPenMode) {
+        penToggleBtn.textContent = '🤙 小指ペン: ON';
+        penToggleBtn.classList.add('btn-active');
+      } else {
+        penToggleBtn.textContent = '🤙 小指ペン: OFF';
+        penToggleBtn.classList.remove('btn-active');
+      }
+    }
+
+    function setPenColor(color, el) {
+      penColor = color;
+      penNibTip.setAttribute('fill', color);
+      penBodyBand.setAttribute('fill', color);
+      penInkGlow.setAttribute('stroke', color);
+      document.querySelectorAll('.color-dot').forEach(d => d.classList.remove('selected'));
+      if (el) el.classList.add('selected');
+      if (!isPenMode) togglePenMode();
+    }
+
+    function cyclePenWidth() {
+      penWidthIdx = (penWidthIdx + 1) % penWidths.length;
+      penWidthBtn.textContent = `太さ: ${penWidths[penWidthIdx].label}`;
+    }
+
+    function clearDrawing() {
+      drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      lastDrawX = null;
+      lastDrawY = null;
+    }
+
+    function toggleFullView() {
+      const isFull = document.body.classList.toggle('fullscreen-view');
+      fullscreenBtn.textContent = isFull ? '🗗 元に戻す' : '⛶ 全画面';
+    }
+
+    function setZoom(z) {
+      currentZoom = Math.max(0.5, Math.min(2.5, z));
+      zoomStage.style.transform = `scale(${currentZoom})`;
+      scrollContainer.style.justifyContent = currentZoom > 1.0 ? 'flex-start' : 'center';
+    }
+
+    function execCmd(command, value = null) {
+      docArea.focus();
+      document.execCommand(command, false, value);
+    }
+
+    function newDocument() {
+      isPdfMode = false;
+      pdfBox.style.display = 'none';
+      docArea.style.display = 'block';
+      editorButtons.style.display = 'flex';
+      setZoom(1.0);
+      clearDrawing();
+      docTitle.value = "新規ドキュメント";
+      docArea.innerHTML = "<h1>新規ドキュメント</h1><p></p>";
+    }
+
+    function loadSampleDoc() {
+      isPdfMode = false;
+      pdfBox.style.display = 'none';
+      docArea.style.display = 'block';
+      editorButtons.style.display = 'flex';
+      setZoom(1.0);
+      clearDrawing();
+      docTitle.value = "議事録サンプル";
+      docArea.innerHTML = "<h1>定例会議 議事録</h1><p><b>日時:</b> 2026年11月24日</p><p>小指でペンを持ち、親指を伸ばすとインクが出て赤入れができます。</p>";
+    }
+
+    function handleFileOpen(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      docTitle.value = file.name.replace(/\.[^/.]+$/, "");
+      clearDrawing();
+
+      if (file.name.toLowerCase().endsWith('.pdf')) {
+        isPdfMode = true;
+        docArea.style.display = 'none';
+        editorButtons.style.display = 'none';
+        setZoom(1.0);
+        pdfEmbed.src = URL.createObjectURL(file) + "#toolbar=0&navpanes=0&scrollbar=0";
+        pdfBox.style.display = 'block';
+        scrollContainer.scrollTop = 0;
+        scrollContainer.scrollLeft = 0;
+      } else {
+        isPdfMode = false;
+        pdfBox.style.display = 'none';
+        docArea.style.display = 'block';
+        editorButtons.style.display = 'flex';
+        setZoom(1.0);
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          const content = e.target.result;
+          if (content.includes('<html') || content.includes('<body') || content.includes('<p>')) {
+            const parsed = new DOMParser().parseFromString(content, 'text/html');
+            docArea.innerHTML = parsed.body ? parsed.body.innerHTML : content;
+          } else {
+            docArea.innerHTML = content.split(/\r?\n/).map(l => `<p>${l || '<br>'}</p>`).join('');
+          }
+        };
+        reader.readAsText(file, 'UTF-8');
+      }
+      event.target.value = '';
+    }
+
+    function exportToWord() {
+      const html = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'></head><body>${docArea.innerHTML}</body></html>`;
+      const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${docTitle.value || 'document'}.doc`;
+      a.click();
+    }
+
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const cursorEl = document.getElementById('virtual-cursor');
+
+    let prevX = window.innerWidth / 2, prevY = window.innerHeight / 2;
+    let isClicking = false, pinchCount = 0;
+    let lastScrollX = null;
+    let lastScrollY = null;
+    let lastZoomY = null;
+    let activeCamera = null;
+    let activeHands = null;
+
+    function drawStrokeAtScreenPos(screenX, screenY) {
+      const rect = drawCanvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      if (screenX < rect.left || screenX > rect.right || screenY < rect.top || screenY > rect.bottom) {
+        lastDrawX = null;
+        lastDrawY = null;
+        return false;
+      }
+
+      const scaleX = drawCanvas.width / rect.width;
+      const scaleY = drawCanvas.height / rect.height;
+      const canvasX = (screenX - rect.left) * scaleX;
+      const canvasY = (screenY - rect.top) * scaleY;
+
+      if (lastDrawX !== null && lastDrawY !== null) {
+        drawCtx.beginPath();
+        drawCtx.moveTo(lastDrawX, lastDrawY);
+        drawCtx.lineTo(canvasX, canvasY);
+        drawCtx.strokeStyle = penColor;
+        drawCtx.lineWidth = penWidths[penWidthIdx].size;
+        drawCtx.lineCap = 'round';
+        drawCtx.lineJoin = 'round';
+        drawCtx.stroke();
+      } else {
+        // インクを出した瞬間の点（ドット）も描画できるようにする
+        drawCtx.beginPath();
+        drawCtx.arc(canvasX, canvasY, penWidths[penWidthIdx].size / 2, 0, Math.PI * 2);
+        drawCtx.fillStyle = penColor;
+        drawCtx.fill();
+      }
+      lastDrawX = canvasX;
+      lastDrawY = canvasY;
+      return true;
+    }
+
+    function onResults(results) {
+      const w = canvasElement.width, h = canvasElement.height;
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, w, h);
+      canvasCtx.translate(w, 0);
+      canvasCtx.scale(-1, 1);
+      canvasCtx.drawImage(results.image, 0, 0, w, h);
+      canvasCtx.restore();
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const lm = results.multiHandLandmarks[0].map(p => ({ x: 1 - p.x, y: p.y, z: p.z }));
+        cursorEl.style.display = 'block';
+        drawConnectors(canvasCtx, lm, HAND_CONNECTIONS, { color: '#89b4fa', lineWidth: 2 });
+        drawLandmarks(canvasCtx, lm, { color: '#a6e3a1', lineWidth: 1, radius: 3 });
+
+        const indexOpen  = lm[8].y < lm[6].y;
+        const middleOpen = lm[12].y < lm[10].y;
+        const ringOpen   = lm[16].y < lm[14].y;
+        const pinkyOpen  = lm[20].y < lm[18].y;
+
+        // 親指が伸びているか判定（親指の先端 lm[4] と人差し指の付け根 lm[5] の距離、および親指関節の伸び具合）
+        const thumbTipToIndexBase = Math.hypot(lm[4].x - lm[5].x, lm[4].y - lm[5].y);
+        const thumbTipToPinkyBase = Math.hypot(lm[4].x - lm[17].x, lm[4].y - lm[17].y);
+        const thumbOpen = thumbTipToIndexBase > 0.11 && thumbTipToPinkyBase > 0.22;
+
+        const ix = lm[8].x * w, iy = lm[8].y * h;
+        const tx = lm[4].x * w, ty = lm[4].y * h;
+        const mx = lm[12].x * w, my = lm[12].y * h;
+
+        const dThumbIndex = Math.hypot(tx - ix, ty - iy);
+        const dIndexMiddle = Math.hypot(mx - ix, my - iy);
+
+        // 1. 【パー（5本指すべて開く）】→ ズームモード
+        if (indexOpen && middleOpen && ringOpen && pinkyOpen) {
+          cursorEl.classList.add('zooming');
+          cursorEl.classList.remove('clicking', 'scrolling', 'pen-hold', 'drawing');
+          pinchCount = 0;
+          lastScrollX = null;
+          lastScrollY = null;
+          lastDrawX = null;
+          lastDrawY = null;
+          wasPenActive = false;
+
+          const palmY = lm[9].y * h;
+          if (lastZoomY !== null) {
+            const deltaY = lastZoomY - palmY;
+            if (Math.abs(deltaY) > 1.2) {
+              setZoom(currentZoom + deltaY * 0.008);
+            }
+          }
+          lastZoomY = palmY;
+          statusText.textContent = `ズーム中: ${Math.round(currentZoom * 100)}%`;
+          return;
+        }
+        cursorEl.classList.remove('zooming');
+        lastZoomY = null;
+
+        // 2. 【2本指（人差し指＋中指）】→ スクロールモード
+        if (indexOpen && middleOpen && !ringOpen && !pinkyOpen && dIndexMiddle < 28) {
+          cursorEl.classList.add('scrolling');
+          cursorEl.classList.remove('clicking', 'pen-hold', 'drawing');
+          statusText.textContent = "スクロール中 (上下・左右)";
+          if (lastScrollX !== null && lastScrollY !== null) {
+            scrollContainer.scrollLeft -= (ix - lastScrollX) * 8;
+            scrollContainer.scrollTop -= (iy - lastScrollY) * 8;
+          }
+          lastScrollX = ix;
+          lastScrollY = iy;
+          pinchCount = 0;
+          lastDrawX = null;
+          lastDrawY = null;
+          wasPenActive = false;
+          return;
+        }
+        cursorEl.classList.remove('scrolling');
+        lastScrollX = null;
+        lastScrollY = null;
+
+        // 3. 【小指ペンモード】（小指が立ち、人差し指・中指・薬指が閉じている時）
+        const isHoldingPen = isPenMode && pinkyOpen && !indexOpen && !middleOpen && !ringOpen;
+
+        if (isHoldingPen) {
+          const targetX = Math.max(0, Math.min(1, lm[20].x)) * window.innerWidth;
+          const targetY = Math.max(0, Math.min(1, lm[20].y)) * window.innerHeight;
+          if (!wasPenActive) {
+            prevX = targetX;
+            prevY = targetY;
+            wasPenActive = true;
+          } else {
+            prevX += (targetX - prevX) / 2.8;
+            prevY += (targetY - prevY) / 2.8;
+          }
+          cursorEl.style.left = `${prevX}px`;
+          cursorEl.style.top = `${prevY}px`;
+
+          pinchCount = 0;
+          isClicking = false;
+          cursorEl.classList.remove('clicking');
+
+          if (thumbOpen) {
+            // 親指も伸びている（🤙）→ インクを出して筆記
+            cursorEl.classList.remove('pen-hold');
+            cursorEl.classList.add('drawing');
+            const drew = drawStrokeAtScreenPos(prevX, prevY);
+            if (drew) {
+              statusText.textContent = "🤙 インクON：筆記中...";
+            } else {
+              statusText.textContent = "🤙 インクON（用紙の上で描けます）";
+            }
+          } else {
+            // 小指のみ（親指は曲げる）→ ペンを持って移動のみ
+            lastDrawX = null;
+            lastDrawY = null;
+            cursorEl.classList.remove('drawing');
+            cursorEl.classList.add('pen-hold');
+            statusText.textContent = "✒️ ペン保持中（親指を伸ばすとインクが出ます）";
+          }
+          return;
+        }
+
+        lastDrawX = null;
+        lastDrawY = null;
+        wasPenActive = false;
+        cursorEl.classList.remove('pen-hold', 'drawing');
+
+        // 4. 通常カーソル移動（人差し指）
+        const targetX = Math.max(0, Math.min(1, lm[8].x)) * window.innerWidth;
+        const targetY = Math.max(0, Math.min(1, lm[8].y)) * window.innerHeight;
+        prevX += (targetX - prevX) / 5;
+        prevY += (targetY - prevY) / 5;
+        cursorEl.style.left = `${prevX}px`;
+        cursorEl.style.top = `${prevY}px`;
+
+        // 5. 【確実密着クリック】（親指＋人差し指）
+        if (!ringOpen && !pinkyOpen && dThumbIndex <= 17) {
+          pinchCount++;
+          if (pinchCount >= 3) {
+            cursorEl.classList.add('clicking');
+            statusText.textContent = "クリック！";
+            if (!isClicking) {
+              isClicking = true;
+              cursorEl.style.display = 'none';
+              const el = document.elementFromPoint(prevX, prevY);
+              cursorEl.style.display = 'block';
+              if (el) { el.click(); if (el.isContentEditable || el.tagName === 'INPUT') el.focus(); }
+            }
+          }
+        } else {
+          pinchCount = 0;
+          cursorEl.classList.remove('clicking');
+          statusText.textContent = isPenMode ? "認識中（小指でペンを持つ / 人差し指で移動）" : "認識中（ペンOFF）";
+          isClicking = false;
+        }
+      } else {
+        cursorEl.style.display = 'none';
+        statusText.textContent = "手を映してください";
+        pinchCount = 0;
+        lastZoomY = null;
+        lastScrollX = null;
+        lastScrollY = null;
+        lastDrawX = null;
+        lastDrawY = null;
+        wasPenActive = false;
+      }
+    }
+
+    async function startCamera() {
+      try {
+        statusText.textContent = "カメラを起動中...";
+        if (typeof Hands === 'undefined') {
+          statusText.textContent = "エラー: ネット接続を確認してください";
+          return;
+        }
+        if (videoElement.srcObject) {
+          videoElement.srcObject.getTracks().forEach(track => track.stop());
+          videoElement.srcObject = null;
+        }
+
+        if (!activeHands) {
+          activeHands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+          activeHands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+          activeHands.onResults(onResults);
+        }
+
+        activeCamera = new Camera(videoElement, {
+          onFrame: async () => {
+            if (activeHands) {
+              await activeHands.send({ image: videoElement });
+            }
+          },
+          width: 320,
+          height: 240
+        });
+        await activeCamera.start();
+      } catch (err) {
+        statusText.textContent = "カメラエラー: " + err.message;
+      }
+    }
+
+    window.addEventListener('load', startCamera);
+  </script>
+</body>
+</html>
